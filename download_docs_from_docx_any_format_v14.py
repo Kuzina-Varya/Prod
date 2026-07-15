@@ -128,6 +128,24 @@ def publication_pravo_pdf_url(eonumber: str, scheme: str = "http") -> str:
     return f"{scheme}://publication.pravo.gov.ru/file/pdf?eoNumber={eonumber}"
 
 
+def is_protect_gost_search_url(url: str) -> bool:
+    parsed = urlparse(url)
+    host = normalized_host(parsed)
+    path = parsed.path.rstrip("/").lower()
+    if host != "protect.gost.ru" or path not in {"/search", "/search.aspx"}:
+        return False
+    return "search" in {key.lower() for key in parse_qs(parsed.query)}
+
+
+def protect_gost_search_query(url: str) -> str:
+    parsed = urlparse(url)
+    qs = parse_qs(parsed.query)
+    for key, values in qs.items():
+        if key.lower() == "search" and values:
+            return unquote(values[0]).strip()
+    return ""
+
+
 def candidate_urls(original_url: str) -> list[str]:
     """РЎРЅР°С‡Р°Р»Р° СЃС‚СЂРѕРіРѕ HTTP, РїРѕС‚РѕРј HTTPS. Р”СѓР±Р»Рё СѓР±РёСЂР°СЋС‚СЃСЏ."""
     candidates = []
@@ -1411,6 +1429,18 @@ def download_one(session: requests.Session, item: dict, root_dir: Path, args) ->
     if args.dry_run:
         result["status"] = "DRY_RUN"
         result["saved_to"] = str(target_dir)
+        return result
+
+    if is_protect_gost_search_url(item.get("original_url", "")) and not args.allow_generic_pages:
+        query = protect_gost_search_query(item.get("original_url", ""))
+        result["status"] = "SKIPPED_SEARCH_SOURCE" if item.get("parent_url") else "ERROR_BAD_REGISTRY_LINK"
+        result["saved_to"] = str(target_dir)
+        result["error"] = (
+            "Ссылка protect.gost.ru/search является страницей поиска, а не конкретным документом. "
+            "Она часто возвращает 404 и не скачивается как файл. "
+            f"Запрос поиска: {query or item.get('title', '')}. "
+            "В реестре нужна ссылка на карточку документа (/gost/details/...) или прямой файл."
+        )
         return result
 
     try:

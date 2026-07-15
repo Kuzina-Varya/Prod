@@ -1,11 +1,15 @@
+"""Offline extraction of the main legal text from an already loaded HTML string."""
+
 import argparse
 import re
 from pathlib import Path
 
 try:
-    from bs4 import BeautifulSoup
+    from playwright.sync_api import Error as PlaywrightError
+    from playwright.sync_api import sync_playwright
 except ImportError:
-    BeautifulSoup = None
+    PlaywrightError = Exception
+    sync_playwright = None
 
 
 DROP_TAGS = {
@@ -57,6 +61,11 @@ BOILERPLATE_RE = (
     re.compile(r"^99\s*:\s*99"),
 )
 
+PRINT_CONTROL_RE = re.compile(
+    r"^(?:распечатать|печать|напечатать|верси[яю]\s+для\s+печати|print|print\s+version|printer)\b",
+    re.I,
+)
+
 
 def _norm_space(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
@@ -65,6 +74,8 @@ def _norm_space(text: str) -> str:
 def _attr_text(tag) -> str:
     if tag is None:
         return ""
+    if isinstance(tag, dict):
+        return str(tag.get("attrs") or "").lower()
     if getattr(tag, "attrs", None) is None:
         return ""
     values = []
@@ -77,21 +88,11 @@ def _attr_text(tag) -> str:
     return " ".join(values).lower()
 
 
-def _remove_noise(soup: BeautifulSoup) -> None:
-    for tag in soup(list(DROP_TAGS)):
-        tag.decompose()
-
-    for tag in list(soup.find_all(True)):
-        if getattr(tag, "attrs", None) is None:
-            continue
-        attrs = _attr_text(tag)
-        if attrs and any(word in attrs for word in DROP_ATTR_WORDS):
-            tag.decompose()
-
-
 def _line_is_boilerplate(line: str) -> bool:
     low = line.lower().strip(" .:;|")
     if not low:
+        return True
+    if PRINT_CONTROL_RE.search(low):
         return True
     if low in BOILERPLATE_EXACT:
         return True
@@ -127,14 +128,23 @@ def normalize_text(text: str) -> str:
 
 
 def _text_from_tag(tag) -> str:
+    if isinstance(tag, dict):
+        return normalize_text(str(tag.get("text") or ""))
     return normalize_text(tag.get_text("\n", strip=True))
 
 
 def _raw_text(tag) -> str:
+    if isinstance(tag, dict):
+        return str(tag.get("text") or "")
     return tag.get_text("\n", strip=True) if tag is not None else ""
 
 
 def _link_density(tag) -> float:
+    if isinstance(tag, dict):
+        text_len = int(tag.get("text_len") or 0)
+        if text_len == 0:
+            return 1.0
+        return int(tag.get("link_len") or 0) / text_len
     text_len = len(tag.get_text(" ", strip=True))
     if text_len == 0:
         return 1.0
@@ -172,25 +182,143 @@ def _score_text(text: str, tag=None) -> float:
     return score
 
 
-def _candidate_tags(soup: BeautifulSoup):
-    selectors = [
-        "main", "article", "[role=main]",
-        ".content", ".main", ".article", ".document", ".doc", ".text",
-        ".page-content", ".news-detail", ".detail", ".material",
-        "#content", "#main", "#article", "#document", "#docContent",
-    ]
-    seen = set()
-    for selector in selectors:
-        for tag in soup.select(selector):
-            marker = id(tag)
-            if marker not in seen:
-                seen.add(marker)
-                yield tag
-    for tag in soup.find_all(("div", "section", "article", "td", "body")):
-        marker = id(tag)
-        if marker not in seen:
-            seen.add(marker)
-            yield tag
+def _playwright_dom_snapshot(page) -> dict:
+    return page.evaluate(
+        """({ dropTags, dropAttrWords }) => {
+            const printPatterns = [
+                /распечат/i,
+                /\\bпечать\\b/i,
+                /напечат/i,
+                /верси[яю]\\s+для\\s+печати/i,
+                /\\bprint\\b/i,
+                /print\\s+version/i,
+                /printer/i,
+            ];
+
+            const norm = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+            const visibleText = (el) => norm(el.innerText || el.textContent || el.value || '');
+            const attrText = (el) => {
+                const names = ['id', 'class', 'role', 'aria-label', 'data-block', 'data-area', 'title', 'value', 'alt'];
+                return names.map((name) => el.getAttribute(name) || '').join(' ').toLowerCase();
+            };
+            const textWithBreaks = (el) => (el.innerText || el.textContent || '').trim();
+            const linkLength = (el) => Array.from(el.querySelectorAll('a'))
+                .reduce((total, link) => total + visibleText(link).length, 0);
+            const snapshot = (el) => {
+                const text = textWithBreaks(el);
+                return {
+                    text,
+                    attrs: attrText(el),
+                    text_len: norm(text).length,
+                    link_len: linkLength(el),
+                };
+            };
+
+            document.querySelectorAll(dropTags.join(',')).forEach((el) => el.remove());
+
+            const controlSelector = 'a,input,[role="button"],[onclick],[class*="print" i],[id*="print" i]';
+            document.querySelectorAll(controlSelector).forEach((el) => {
+                const combined = norm(`${visibleText(el)} ${attrText(el)}`);
+                if (combined.length <= 140 && printPatterns.some((pattern) => pattern.test(combined))) {
+                    el.remove();
+                }
+            });
+
+            Array.from(document.querySelectorAll('*')).forEach((el) => {
+                const attrs = attrText(el);
+                if (attrs && dropAttrWords.some((word) => attrs.includes(word))) {
+                    el.remove();
+                }
+            });
+
+            const selectors = [
+                'main', 'article', '[role=main]',
+                '.content', '.main', '.article', '.document', '.doc', '.text',
+                '.page-content', '.news-detail', '.detail', '.material',
+                '#content', '#main', '#article', '#document', '#docContent',
+            ];
+            const seen = new Set();
+            const candidates = [];
+            const add = (el) => {
+                if (!el || seen.has(el)) {
+                    return;
+                }
+                seen.add(el);
+                candidates.push(snapshot(el));
+            };
+
+            selectors.forEach((selector) => document.querySelectorAll(selector).forEach(add));
+            document.querySelectorAll('div,section,article,td,body').forEach(add);
+
+            return {
+                body: snapshot(document.body || document.documentElement),
+                candidates,
+            };
+        }""",
+        {
+            "dropTags": sorted(DROP_TAGS),
+            "dropAttrWords": list(DROP_ATTR_WORDS),
+        },
+    )
+
+
+def _block_external_request(route) -> None:
+    url = route.request.url.lower()
+    if url.startswith(("http://", "https://")):
+        route.abort()
+        return
+    route.continue_()
+
+
+def _extract_with_playwright(html: str) -> str:
+    if sync_playwright is None:
+        raise RuntimeError("playwright is not installed")
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except PlaywrightError:
+            browser = p.chromium.launch(channel="chrome", headless=True)
+        try:
+            page = browser.new_page(java_script_enabled=False)
+            page.route("**/*", _block_external_request)
+            page.set_content(html, wait_until="domcontentloaded", timeout=15000)
+            snapshot = _playwright_dom_snapshot(page)
+        finally:
+            browser.close()
+
+    body = snapshot.get("body") or {"text": ""}
+    best_text = _text_from_tag(body)
+    best_score = _score_text(best_text, body)
+
+    for tag in snapshot.get("candidates") or []:
+        text = _text_from_tag(tag)
+        if len(text) < 180:
+            continue
+        score = _score_text(text, tag)
+        if score > best_score:
+            best_text = text
+            best_score = score
+
+    return _trim_before_document_start(best_text)
+
+
+def _extract_with_regex_fallback(html: str) -> str:
+    text = html
+    for tag in sorted(DROP_TAGS, key=len, reverse=True):
+        text = re.sub(rf"(?is)<{tag}\b.*?>.*?</{tag}>", " ", text)
+    text = re.sub(
+        r"(?is)<(?:a|input)\b[^>]*(?:распечат|печать|print|printer)[^>]*(?:>.*?</a>|/?>)",
+        " ",
+        text,
+    )
+    text = re.sub(
+        r"(?is)<a\b[^>]*>[^<]*(?:распечат|печать|print|printer)[^<]*</a>",
+        " ",
+        text,
+    )
+    text = re.sub(r"(?s)<[^>]+>", "\n", text)
+    return _trim_before_document_start(normalize_text(text))
 
 
 def _trim_before_document_start(text: str) -> str:
@@ -221,31 +349,14 @@ def _trim_before_document_start(text: str) -> str:
 
 
 def extract_main_text_from_html(html: str) -> str:
+    """Return cleaned document text from an HTML string without making network requests."""
     if not html:
         return ""
 
-    if BeautifulSoup is None:
-        text = re.sub(r"(?is)<(script|style|noscript|svg).*?>.*?</\1>", " ", html)
-        text = re.sub(r"(?s)<[^>]+>", "\n", text)
-        return _trim_before_document_start(normalize_text(text))
-
-    soup = BeautifulSoup(html, "html.parser")
-    _remove_noise(soup)
-
-    body = soup.body or soup
-    best_text = _text_from_tag(body)
-    best_score = _score_text(best_text, body)
-
-    for tag in _candidate_tags(soup):
-        text = _text_from_tag(tag)
-        if len(text) < 180:
-            continue
-        score = _score_text(text, tag)
-        if score > best_score:
-            best_text = text
-            best_score = score
-
-    return _trim_before_document_start(best_text)
+    try:
+        return _extract_with_playwright(html)
+    except (RuntimeError, PlaywrightError):
+        return _extract_with_regex_fallback(html)
 
 
 def clean_html_file(input_path: Path, output_path: Path) -> None:

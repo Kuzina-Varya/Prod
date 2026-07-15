@@ -1,3 +1,16 @@
+"""
+Поисковая тулза для строительных нормативных документов на sniprf.ru.
+
+Модуль рассчитан на будущий вызов из LLM/tool-слоя. Главная точка входа -
+`search_documents_for_construction()`: функция принимает обычный текстовый
+запрос, ищет только по sniprf.ru/www.sniprf.ru, ранжирует найденные документы и
+при необходимости добавляет очищенный HTML-текст через отдельный модуль
+`html_legal_text_parser.extract_main_text_from_html()`.
+
+Этот файл отвечает за поиск, фильтрацию URL, ранжирование и диагностику. Он не
+должен заменять HTML-парсер и не должен искать по внешним сайтам.
+"""
+
 import json
 import re
 import sys
@@ -13,6 +26,7 @@ from bs4 import BeautifulSoup
 # ============================================================
 
 def find_project_root() -> Path:
+    """Находит корень проекта по файлу html_legal_text_parser.py."""
     current_file = Path(__file__).resolve()
 
     for parent in [current_file.parent, *current_file.parents]:
@@ -107,6 +121,7 @@ SP_YEARS = [
 # ============================================================
 
 def force_http(url: str) -> str:
+    """Приводит URL sniprf к HTTP, потому что сайт стабильнее работает так."""
     url = str(url or "").strip()
     if url.startswith("https://"):
         return "http://" + url[len("https://"):]
@@ -114,10 +129,12 @@ def force_http(url: str) -> str:
 
 
 def get_host(url: str) -> str:
+    """Возвращает домен URL в нижнем регистре."""
     return (urlparse(url).hostname or "").lower()
 
 
 def is_allowed_host(url: str) -> bool:
+    """Разрешает запросы только к sniprf.ru и www.sniprf.ru."""
     return get_host(url) in ALLOWED_HOSTS
 
 
@@ -140,6 +157,7 @@ def is_binary_url(url: str) -> bool:
 
 
 def normalize_query_words(query: str) -> list[str]:
+    """Преобразует обычный запрос в значимые поисковые слова."""
     text = str(query or "").lower().replace("ё", "е")
     text = re.sub(r"[^а-яa-z0-9.\s-]+", " ", text, flags=re.I)
 
@@ -176,6 +194,7 @@ def normalize_query_words(query: str) -> list[str]:
 
 
 def expand_query_words(words: list[str]) -> list[str]:
+    """Добавляет небольшой словарь строительных синонимов для ранжирования."""
     synonyms = {
         "фундамент": ["основания", "основание", "фундаменты", "свайные"],
         "фундамента": ["основания", "основание", "фундамент", "свайные"],
@@ -198,9 +217,11 @@ def expand_query_words(words: list[str]) -> list[str]:
 
 def extract_sp_numbers(query: str) -> list[str]:
     """
-    Извлекает номера СП:
-    СП 22.13330 -> 22-13330
-    СП 63.13330 -> 63-13330
+    Извлекает номера СП из запроса.
+
+    Примеры:
+    - "СП 22.13330" -> ["22-13330"]
+    - "SP 63.13330" -> ["63-13330"]
     """
     text = str(query or "").lower().replace(",", ".")
     result = []
@@ -229,11 +250,100 @@ def looks_like_snip_url(url: str) -> bool:
     return "/razdel-" in path or bool(re.search(r"/\d+-\d+-\d+", path))
 
 
+def is_catalog_listing_url(url: str) -> bool:
+    """Определяет страницы-каталоги sniprf, которые не являются документами."""
+    path = urlparse(force_http(url)).path.lower().rstrip("/")
+    return path in {"", "/sp"} or bool(re.fullmatch(r"/sp\d{3}x|/sp\d{4}", path))
+
+
+def is_http_404(error: Exception) -> bool:
+    response = getattr(error, "response", None)
+    return getattr(response, "status_code", None) == 404
+
+
+def classify_page_exception(url: str, error: Exception) -> dict:
+    """Преобразует ошибки загрузки в понятную диагностику для LLM."""
+    if is_http_404(error) and is_catalog_listing_url(url):
+        return {
+            "status": "skipped",
+            "severity": "info",
+            "ignored": True,
+            "error_kind": "expected_missing_catalog_page",
+            "error": f"{type(error).__name__}: {error}",
+            "diagnostic": (
+                "На sniprf.ru нет этой годовой страницы каталога. "
+                "Это нормально: скрипт пробует возможный раздел и идёт дальше."
+            ),
+        }
+
+    if is_http_404(error):
+        return {
+            "status": "skipped",
+            "severity": "warning",
+            "ignored": True,
+            "error_kind": "missing_page",
+            "error": f"{type(error).__name__}: {error}",
+            "diagnostic": "Страница не найдена на sniprf.ru. Документ пропущен, поиск продолжается.",
+        }
+
+    return {
+        "status": "error",
+        "severity": "error",
+        "ignored": False,
+        "error_kind": type(error).__name__,
+        "error": f"{type(error).__name__}: {error}",
+        "diagnostic": "Неожиданная ошибка загрузки или парсинга страницы.",
+    }
+
+
+def normalize_identifier(value: str) -> str:
+    return re.sub(r"[^0-9]+", "-", str(value or "")).strip("-")
+
+
+def exact_sp_number_matches(query: str, title: str, url: str) -> list[str]:
+    """Возвращает номера СП из запроса, точно совпавшие с заголовком или URL."""
+    text = f"{title} {url}".lower().replace(",", ".")
+    matches = []
+
+    for sp_num in extract_sp_numbers(query):
+        dotted = sp_num.replace("-", ".")
+        compact_patterns = (
+            rf"\bсп\s*{re.escape(dotted)}\b",
+            rf"\bsp\s*{re.escape(dotted)}\b",
+            rf"/sp{re.escape(sp_num)}(?:-|/|$)",
+        )
+
+        if any(re.search(pattern, text, flags=re.I) for pattern in compact_patterns):
+            matches.append(sp_num)
+
+    return list(dict.fromkeys(matches))
+
+
+def candidate_sort_key(candidate: dict) -> tuple:
+    """Ставит точные совпадения номера выше общих текстовых совпадений."""
+    source_priority = 1 if candidate.get("source_mode") == "direct_sp_url" else 0
+    matched_count = len(candidate.get("matched_keywords") or [])
+    exact_priority = 1 if candidate.get("exact_identifier_matches") else 0
+    return (
+        exact_priority,
+        float(candidate.get("score") or 0),
+        matched_count,
+        source_priority,
+        len(candidate.get("title") or ""),
+    )
+
+
 # ============================================================
 # ЗАГРУЗКА HTML
 # ============================================================
 
 def fetch_html(url: str) -> str:
+    """
+    Загружает HTML-страницу с sniprf.ru.
+
+    Функция запрещает чужие домены до запроса и дополнительно проверяет, что
+    сайт не перенаправил ответ на внешний домен.
+    """
     url = force_http(url)
 
     if not is_allowed_host(url):
@@ -275,10 +385,11 @@ def fetch_html(url: str) -> str:
 
 def build_direct_sp_urls(query: str) -> list[str]:
     """
-    Если в запросе есть СП 22.13330, сразу пробуем прямые страницы:
-    /sp22-13330-2016
-    /sp22-13330-2011
-    и т.д.
+    Строит прямые URL документов, если в запросе есть номер СП.
+
+    Если запрос содержит "СП 22.13330", тулза сначала проверяет вероятные
+    страницы вида /sp22-13330-2016 и /sp22-13330-2011, а уже потом использует
+    более широкий поиск по каталогам.
     """
     urls = []
 
@@ -291,8 +402,10 @@ def build_direct_sp_urls(query: str) -> list[str]:
 
 def build_catalog_urls() -> list[str]:
     """
-    sniprf плохо ищется через /search/node.
-    Поэтому берём каталоги СП и парсим ссылки оттуда.
+    Формирует страницы-каталоги, из которых берутся ссылки на документы.
+
+    Внутренний поиск sniprf.ru не всегда надёжен, поэтому тулза дополнительно
+    парсит главную и каталожные страницы, а затем ранжирует найденные ссылки.
     """
     urls = [
         f"{BASE_URL}/",
@@ -307,7 +420,9 @@ def build_catalog_urls() -> list[str]:
 
 def build_search_urls(query: str, max_pages: int = 3) -> list[str]:
     """
-    Оставляем старые поисковые URL только как fallback/диагностику.
+    Формирует URL внутреннего поиска sniprf.ru как запасной источник.
+
+    Эти URL также ограничены BASE_URL и не обращаются к внешним поисковикам.
     """
     query = str(query or "").strip()
 
@@ -338,6 +453,7 @@ def build_search_urls(query: str, max_pages: int = 3) -> list[str]:
 # ============================================================
 
 def is_bad_link(url: str, title: str) -> bool:
+    """Отбрасывает навигацию, кабинет, контакты, поиск и старые СНиП-ссылки."""
     url_lower = force_http(url).lower()
     title_lower = normalize_space(title).lower()
 
@@ -369,6 +485,7 @@ def is_bad_link(url: str, title: str) -> bool:
 
 
 def infer_document_type(title: str, url: str) -> str:
+    """Определяет примерный тип документа по заголовку и URL."""
     text = f"{title} {url}".lower()
 
     if re.search(r"\bсп\s*\d+|/sp\d", text, flags=re.I):
@@ -393,6 +510,13 @@ def infer_document_type(title: str, url: str) -> str:
 
 
 def score_candidate(title: str, url: str, query: str, snippet: str = "") -> tuple[float, list[str]]:
+    """
+    Оценивает релевантность документа запросу.
+
+    Точные номера СП имеют самый высокий вес. Слова из исходного запроса
+    важнее синонимов, поэтому общие совпадения по теме не должны обгонять
+    явно запрошенный номер документа.
+    """
     title = normalize_space(title)
     snippet = normalize_space(snippet)
 
@@ -402,16 +526,33 @@ def score_candidate(title: str, url: str, query: str, snippet: str = "") -> tupl
 
     blob = f"{title_lower} {snippet_lower} {url_lower}"
 
-    query_words = expand_query_words(normalize_query_words(query))
+    base_query_words = normalize_query_words(query)
+    expanded_query_words = expand_query_words(base_query_words)
+    synonym_words = [word for word in expanded_query_words if word not in base_query_words]
 
     score = 0
     matched = []
 
-    for word in query_words:
+    for word in base_query_words:
         word = word.lower().replace("ё", "е")
         if word and word in blob:
-            score += 14
+            if re.search(r"\d", word):
+                score += 30
+            elif word in {"сп", "гост"}:
+                score += 6
+            else:
+                score += 18
             matched.append(word)
+
+    for word in synonym_words:
+        word = word.lower().replace("ё", "е")
+        if word and word in blob:
+            score += 6
+            matched.append(word)
+
+    exact_matches = exact_sp_number_matches(query, title, url)
+    if exact_matches:
+        score += 85
 
     for marker in DOCUMENT_MARKERS:
         if marker in blob:
@@ -448,11 +589,18 @@ def score_candidate(title: str, url: str, query: str, snippet: str = "") -> tupl
     if not matched and not any(marker in blob for marker in DOCUMENT_MARKERS):
         score -= 30
 
-    normalized = max(0.0, min(1.0, score / 100))
+    if not matched:
+        score -= 20
+
+    if is_catalog_listing_url(url):
+        score -= 55
+
+    normalized = max(0.0, min(1.0, score / 180))
     return normalized, list(dict.fromkeys(matched))
 
 
 def extract_page_title(html: str) -> str:
+    """Достаёт заголовок страницы сначала из h1, затем из HTML title."""
     soup = BeautifulSoup(html, "html.parser")
 
     h1 = soup.find("h1")
@@ -473,7 +621,10 @@ def extract_page_title(html: str) -> str:
 
 def make_candidate_from_url(url: str, query: str, source_mode: str) -> dict | None:
     """
-    Для прямых URL типа /sp22-13330-2016.
+    Загружает прямой URL документа и превращает его в кандидата выдачи.
+
+    Используется в основном для предполагаемых прямых страниц СП, например
+    /sp22-13330-2016.
     """
     try:
         html = fetch_html(url)
@@ -504,6 +655,7 @@ def make_candidate_from_url(url: str, query: str, source_mode: str) -> dict | No
             "document_type": infer_document_type(title, url),
             "score": round(score, 3),
             "matched_keywords": matched,
+            "exact_identifier_matches": exact_sp_number_matches(query, title, url),
             "snippet": snippet,
             "source_mode": source_mode,
             "source_search_url": url,
@@ -514,6 +666,12 @@ def make_candidate_from_url(url: str, query: str, source_mode: str) -> dict | No
 
 
 def extract_candidates_from_html(html: str, page_url: str, query: str, min_score: float) -> list[dict]:
+    """
+    Парсит ссылки из HTML-страницы и возвращает кандидаты документов.
+
+    Страницы-каталоги можно использовать как источники ссылок, но сами
+    каталоги фильтруются и не возвращаются как итоговые документы.
+    """
     soup = BeautifulSoup(html, "html.parser")
 
     for tag in soup(["script", "style", "noscript", "svg", "iframe"]):
@@ -532,6 +690,9 @@ def extract_candidates_from_html(html: str, page_url: str, query: str, min_score
         full_url = strip_fragment(full_url)
 
         if not is_allowed_host(full_url):
+            continue
+
+        if is_catalog_listing_url(full_url):
             continue
 
         title = normalize_space(a.get_text(" ", strip=True))
@@ -566,6 +727,7 @@ def extract_candidates_from_html(html: str, page_url: str, query: str, min_score
             "document_type": infer_document_type(title, full_url),
             "score": round(score, 3),
             "matched_keywords": matched,
+            "exact_identifier_matches": exact_sp_number_matches(query, title, full_url),
             "snippet": snippet,
             "source_mode": "catalog_or_search",
             "source_search_url": page_url,
@@ -581,6 +743,12 @@ def extract_candidates_from_html(html: str, page_url: str, query: str, min_score
 # ============================================================
 
 def enrich_candidate_with_text(candidate: dict, include_full_text: bool = False) -> dict:
+    """
+    Добавляет text_preview/text к HTML-кандидату через html_legal_text_parser.
+
+    Бинарные файлы здесь не парсятся. Так поиск и извлечение текста остаются
+    разными зонами ответственности.
+    """
     url = candidate["url"]
 
     if is_binary_url(url):
@@ -623,6 +791,23 @@ def search_documents_for_construction(
     include_text: bool = True,
     include_full_text: bool = False,
 ) -> str:
+    """
+    Ищет на sniprf.ru строительные документы по обычному текстовому запросу.
+
+    Параметры:
+    - search_query: текст запроса от пользователя или LLM.
+    - iteration_count: страница результатов, начиная с 1.
+    - max_pages: сколько страниц внутреннего поиска sniprf проверить.
+    - limit: сколько документов вернуть за один вызов.
+    - min_score: минимальная оценка релевантности кандидата.
+    - include_text: добавлять `text_preview` через html_legal_text_parser.
+    - include_full_text: добавлять полный HTML-текст, а не только превью.
+
+    Возвращает:
+    JSON-строку с диагностикой (`page_reports`, `page_errors`, `page_skipped`)
+    и отранжированными `documents`. Ожидаемо отсутствующие страницы-каталоги
+    помечаются как skipped/info и могут игнорироваться LLM.
+    """
     search_query = str(search_query or "").strip()
 
     if not search_query:
@@ -659,8 +844,12 @@ def search_documents_for_construction(
             "mode": "direct_sp_url",
             "url": url,
             "status": "",
+            "severity": "",
+            "ignored": False,
+            "error_kind": "",
             "candidates_found": 0,
             "error": "",
+            "diagnostic": "",
         }
 
         try:
@@ -672,8 +861,7 @@ def search_documents_for_construction(
             report["candidates_found"] = add_candidate(candidate)
             report["status"] = "ok"
         except Exception as e:
-            report["status"] = "error"
-            report["error"] = f"{type(e).__name__}: {e}"
+            report.update(classify_page_exception(url, e))
 
         page_reports.append(report)
 
@@ -685,8 +873,12 @@ def search_documents_for_construction(
             "mode": "catalog",
             "url": url,
             "status": "",
+            "severity": "",
+            "ignored": False,
+            "error_kind": "",
             "candidates_found": 0,
             "error": "",
+            "diagnostic": "",
         }
 
         try:
@@ -706,8 +898,7 @@ def search_documents_for_construction(
             report["candidates_found"] = count
 
         except Exception as e:
-            report["status"] = "error"
-            report["error"] = f"{type(e).__name__}: {e}"
+            report.update(classify_page_exception(url, e))
 
         page_reports.append(report)
 
@@ -719,8 +910,12 @@ def search_documents_for_construction(
             "mode": "site_search",
             "url": url,
             "status": "",
+            "severity": "",
+            "ignored": False,
+            "error_kind": "",
             "candidates_found": 0,
             "error": "",
+            "diagnostic": "",
         }
 
         try:
@@ -740,12 +935,11 @@ def search_documents_for_construction(
             report["candidates_found"] = count
 
         except Exception as e:
-            report["status"] = "error"
-            report["error"] = f"{type(e).__name__}: {e}"
+            report.update(classify_page_exception(url, e))
 
         page_reports.append(report)
 
-    all_candidates.sort(key=lambda item: item["score"], reverse=True)
+    all_candidates.sort(key=candidate_sort_key, reverse=True)
 
     offset = (iteration_count - 1) * limit
     selected = all_candidates[offset: offset + limit]
@@ -759,6 +953,9 @@ def search_documents_for_construction(
             for candidate in selected
         ]
 
+    error_count = sum(1 for report in page_reports if report["status"] == "error")
+    skipped_count = sum(1 for report in page_reports if report["status"] == "skipped")
+
     result = {
         "status": "success",
         "query": search_query,
@@ -768,7 +965,10 @@ def search_documents_for_construction(
         "min_score": min_score,
         "project_root": str(PROJECT_ROOT),
         "parser_path": str(PROJECT_ROOT / "html_legal_text_parser.py"),
+        "text_parser": "html_legal_text_parser.extract_main_text_from_html",
         "pages_checked": len(page_reports),
+        "page_errors": error_count,
+        "page_skipped": skipped_count,
         "page_reports": page_reports,
         "total_candidates_found": len(all_candidates),
         "documents_returned": len(selected),
