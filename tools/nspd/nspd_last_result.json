@@ -1,0 +1,174 @@
+{
+  "status": "success",
+  "query": "03:01:320101:8",
+  "current_iteration": 1,
+  "max_pages": 4,
+  "limit": 5,
+  "source_site": "https://nspd.gov.ru/",
+  "search_endpoint": "https://nspd.gov.ru/api/geoportal/v2/search/geoportal",
+  "search_strategy": "nspd_geoportal_v2_search_by_thematic_ids",
+  "query_variants": [
+    "03:01:320101:8"
+  ],
+  "tls_note": "По умолчанию verify_tls=False из-за российской цепочки сертификата NSPD.",
+  "proxy_note": "HTTP.trust_env=False: системный proxy не используется.",
+  "min_score_ignored": 0.15,
+  "include_text_ignored": true,
+  "include_full_text_ignored": false,
+  "thematic_search_ids": [
+    1,
+    2,
+    5,
+    7
+  ],
+  "exact_document_numbers": [
+    "03:01:320101:8"
+  ],
+  "pages_checked": 4,
+  "page_errors": 0,
+  "page_skipped": 0,
+  "page_reports": [
+    {
+      "mode": "nspd_geoportal_api",
+      "query_variant": "03:01:320101:8",
+      "thematic_search_id": 1,
+      "thematic_search_name": "Земельные участки, ОКС, помещения",
+      "url": "https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=1&query=03:01:320101:8",
+      "status": "ok",
+      "http_status": 200,
+      "severity": "",
+      "ignored": false,
+      "error_kind": "",
+      "candidates_found": 1,
+      "error": "",
+      "diagnostic": [
+        {
+          "totalCount": 1,
+          "categoryId": 36368
+        }
+      ]
+    },
+    {
+      "mode": "nspd_geoportal_api",
+      "query_variant": "03:01:320101:8",
+      "thematic_search_id": 2,
+      "thematic_search_name": "Единицы кадастрового деления",
+      "url": "https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=2&query=03:01:320101:8",
+      "status": "ok",
+      "http_status": 404,
+      "severity": "",
+      "ignored": false,
+      "error_kind": "no_objects_found",
+      "candidates_found": 0,
+      "error": "no objects found (код=204)",
+      "diagnostic": "NSPD returned no objects for this thematic search."
+    },
+    {
+      "mode": "nspd_geoportal_api",
+      "query_variant": "03:01:320101:8",
+      "thematic_search_id": 5,
+      "thematic_search_name": "ЗОУИТ, природные и иные территории",
+      "url": "https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=5&query=03:01:320101:8",
+      "status": "ok",
+      "http_status": 404,
+      "severity": "",
+      "ignored": false,
+      "error_kind": "no_objects_found",
+      "candidates_found": 0,
+      "error": "no objects found (код=204)",
+      "diagnostic": "NSPD returned no objects for this thematic search."
+    },
+    {
+      "mode": "nspd_geoportal_api",
+      "query_variant": "03:01:320101:8",
+      "thematic_search_id": 7,
+      "thematic_search_name": "Территориальные зоны",
+      "url": "https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=7&query=03:01:320101:8",
+      "status": "ok",
+      "http_status": 404,
+      "severity": "",
+      "ignored": false,
+      "error_kind": "no_objects_found",
+      "candidates_found": 0,
+      "error": "no objects found (код=204)",
+      "diagnostic": "NSPD returned no objects for this thematic search."
+    }
+  ],
+  "total_candidates_found": 1,
+  "documents_returned": 1,
+  "has_more_documents": false,
+  "documents": [
+    {
+      "title": "Земельные участки ЕГРН: 03:01:320101:8",
+      "url": "https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=1&query=03:01:320101:8",
+      "document_type": "Земельные участки ЕГРН",
+      "content_status": "geojson_feature",
+      "source_mode": "nspd_geoportal_api",
+      "source_search_url": "https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=1&query=03:01:320101:8",
+      "source_query_variant": "03:01:320101:8",
+      "match_query_used": "03:01:320101:8",
+      "thematic_search_id": 1,
+      "thematic_search_name": "Земельные участки, ОКС, помещения",
+      "object_id": 89053009,
+      "category_id": 36368,
+      "category_name": "Земельные участки ЕГРН",
+      "label": "03:01:320101:8",
+      "external_key": "03:01:320101:8",
+      "cadastral_number": "03:01:320101:8",
+      "address": "Местоположение установлено относительно ориентира, расположенного в границах участка. Почтовый адрес ориентира: Российская Федерация, Республика Бурятия, м.р-н Баргузинский, с.п. Баргузинское, с. Шапеньково, ул. Лесная, з/у 11.",
+      "snippet": "03:01:320101:8. Местоположение установлено относительно ориентира, расположенного в границах участка. Почтовый адрес ориентира: Российская Федерация, Республика Бурятия, м.р-н Баргузинский, с.п. Баргузинское, с. Шапеньково, ул. Лесная, з/у 11.",
+      "matched_keywords": [
+        "03:01:320101:8"
+      ],
+      "exact_identifier_matches": [
+        "03:01:320101:8"
+      ],
+      "properties_preview": {
+        "cad_num": "03:01:320101:8",
+        "readable_address": "Местоположение установлено относительно ориентира, расположенного в границах участка. Почтовый адрес ориентира: Российская Федерация, Республика Бурятия, м.р-н Баргузинский, с.п. Баргузинское, с. Шапеньково, ул. Лесная, з/у 11.",
+        "land_record_type": "Земельный участок",
+        "land_record_category_type": "Земли населенных пунктов",
+        "permitted_use_established_by_document": "Для ведения подсобного хозяйства",
+        "ownership_type": "Частная",
+        "right_type": "Собственность",
+        "specified_area": 3295,
+        "cost_value": 697617.4,
+        "quarter_cad_number": "03:01:320101",
+        "status": "Ранее учтенный"
+      },
+      "geometry_summary": {
+        "geometry_type": "Polygon",
+        "crs": "EPSG:3857",
+        "points_count": 14,
+        "bbox": [
+          12206185.33738795,
+          7088018.510909587,
+          12206322.207922857,
+          7088156.056532035
+        ],
+        "coordinates_preview": [
+          [
+            12206268.338174447,
+            7088150.732529444
+          ],
+          [
+            12206194.130124,
+            7088090.815839098
+          ],
+          [
+            12206185.33738795,
+            7088078.480221969
+          ],
+          [
+            12206187.970859157,
+            7088064.361375771
+          ],
+          [
+            12206203.273883319,
+            7088042.638348803
+          ]
+        ]
+      }
+    }
+  ]
+}

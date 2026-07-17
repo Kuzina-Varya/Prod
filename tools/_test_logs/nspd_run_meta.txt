@@ -1,0 +1,5 @@
+﻿exit_code=0
+started=2026-07-17T14:26:35.2774510+06:00
+finished=2026-07-17T14:26:57.7755556+06:00
+duration_seconds=22.5
+log=tools\_test_logs\nspd_run.log

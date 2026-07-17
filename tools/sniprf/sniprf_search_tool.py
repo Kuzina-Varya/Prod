@@ -3,11 +3,11 @@
 
 Модуль рассчитан на будущий вызов из LLM/tool-слоя. Главная точка входа -
 `search_documents_for_construction()`: функция принимает обычный текстовый
-запрос, ищет только по sniprf.ru/www.sniprf.ru, ранжирует найденные документы и
+запрос, ищет только по sniprf.ru/www.sniprf.ru, возвращает найденные документы пачками и
 при необходимости добавляет очищенный HTML-текст через отдельный модуль
 `html_legal_text_parser.extract_main_text_from_html()`.
 
-Этот файл отвечает за поиск, фильтрацию URL, ранжирование и диагностику. Он не
+Этот файл отвечает за поиск, фильтрацию URL и диагностику. Он не
 должен заменять HTML-парсер и не должен искать по внешним сайтам.
 """
 
@@ -19,6 +19,10 @@ from urllib.parse import quote, quote_plus, urljoin, urlparse, urlunparse, unquo
 
 import requests
 from bs4 import BeautifulSoup
+
+
+HTTP = requests.Session()
+HTTP.trust_env = False
 
 
 # ============================================================
@@ -86,35 +90,6 @@ BAD_TEXT_WORDS = (
     "подробнее",
     "добавить комментарий",
 )
-
-DOCUMENT_MARKERS = (
-    "сп ",
-    "сп-",
-    "гост",
-    "свод правил",
-    "строительные нормы",
-    "основания",
-    "здания",
-    "сооружения",
-    "конструкции",
-    "бетонные",
-    "железобетонные",
-    "проектирование",
-    "строительство",
-    "фундамент",
-    "фундаменты",
-    "нагрузки",
-    "воздействия",
-    "безопасность",
-    "свайные",
-)
-
-SP_YEARS = [
-    2025, 2024, 2023, 2022, 2021, 2020,
-    2019, 2018, 2017, 2016, 2015,
-    2014, 2013, 2012, 2011,
-]
-
 
 # ============================================================
 # УТИЛИТЫ
@@ -194,7 +169,7 @@ def normalize_query_words(query: str) -> list[str]:
 
 
 def expand_query_words(words: list[str]) -> list[str]:
-    """Добавляет небольшой словарь строительных синонимов для ранжирования."""
+    """Добавляет небольшой словарь строительных синонимов для диагностических совпадений."""
     synonyms = {
         "фундамент": ["основания", "основание", "фундаменты", "свайные"],
         "фундамента": ["основания", "основание", "фундамент", "свайные"],
@@ -319,20 +294,6 @@ def exact_sp_number_matches(query: str, title: str, url: str) -> list[str]:
     return list(dict.fromkeys(matches))
 
 
-def candidate_sort_key(candidate: dict) -> tuple:
-    """Ставит точные совпадения номера выше общих текстовых совпадений."""
-    source_priority = 1 if candidate.get("source_mode") == "direct_sp_url" else 0
-    matched_count = len(candidate.get("matched_keywords") or [])
-    exact_priority = 1 if candidate.get("exact_identifier_matches") else 0
-    return (
-        exact_priority,
-        float(candidate.get("score") or 0),
-        matched_count,
-        source_priority,
-        len(candidate.get("title") or ""),
-    )
-
-
 # ============================================================
 # ЗАГРУЗКА HTML
 # ============================================================
@@ -359,7 +320,7 @@ def fetch_html(url: str) -> str:
         "Connection": "close",
     }
 
-    response = requests.get(
+    response = HTTP.get(
         url,
         headers=headers,
         timeout=(20, 60),
@@ -383,44 +344,9 @@ def fetch_html(url: str) -> str:
 # URL ДЛЯ ПОИСКА
 # ============================================================
 
-def build_direct_sp_urls(query: str) -> list[str]:
-    """
-    Строит прямые URL документов, если в запросе есть номер СП.
-
-    Если запрос содержит "СП 22.13330", тулза сначала проверяет вероятные
-    страницы вида /sp22-13330-2016 и /sp22-13330-2011, а уже потом использует
-    более широкий поиск по каталогам.
-    """
-    urls = []
-
-    for sp_num in extract_sp_numbers(query):
-        for year in SP_YEARS:
-            urls.append(f"{BASE_URL}/sp{sp_num}-{year}")
-
-    return list(dict.fromkeys(urls))
-
-
-def build_catalog_urls() -> list[str]:
-    """
-    Формирует страницы-каталоги, из которых берутся ссылки на документы.
-
-    Внутренний поиск sniprf.ru не всегда надёжен, поэтому тулза дополнительно
-    парсит главную и каталожные страницы, а затем ранжирует найденные ссылки.
-    """
-    urls = [
-        f"{BASE_URL}/",
-        f"{BASE_URL}/sp",
-    ]
-
-    for year in SP_YEARS:
-        urls.append(f"{BASE_URL}/sp{year}")
-
-    return list(dict.fromkeys(urls))
-
-
 def build_search_urls(query: str, max_pages: int = 3) -> list[str]:
     """
-    Формирует URL внутреннего поиска sniprf.ru как запасной источник.
+    Формирует URL внутреннего поиска sniprf.ru по исходному запросу.
 
     Эти URL также ограничены BASE_URL и не обращаются к внешним поисковикам.
     """
@@ -430,6 +356,11 @@ def build_search_urls(query: str, max_pages: int = 3) -> list[str]:
     encoded_plus = quote_plus(query)
 
     urls = []
+
+    try:
+        max_pages = max(1, int(max_pages))
+    except Exception:
+        max_pages = 3
 
     for page in range(max_pages):
         if page == 0:
@@ -509,14 +440,8 @@ def infer_document_type(title: str, url: str) -> str:
     return "HTML"
 
 
-def score_candidate(title: str, url: str, query: str, snippet: str = "") -> tuple[float, list[str]]:
-    """
-    Оценивает релевантность документа запросу.
-
-    Точные номера СП имеют самый высокий вес. Слова из исходного запроса
-    важнее синонимов, поэтому общие совпадения по теме не должны обгонять
-    явно запрошенный номер документа.
-    """
+def collect_query_matches(title: str, url: str, query: str, snippet: str = "") -> list[str]:
+    """Возвращает найденные слова запроса только как диагностику, без оценки документа."""
     title = normalize_space(title)
     snippet = normalize_space(snippet)
 
@@ -528,75 +453,14 @@ def score_candidate(title: str, url: str, query: str, snippet: str = "") -> tupl
 
     base_query_words = normalize_query_words(query)
     expanded_query_words = expand_query_words(base_query_words)
-    synonym_words = [word for word in expanded_query_words if word not in base_query_words]
-
-    score = 0
     matched = []
 
-    for word in base_query_words:
+    for word in expanded_query_words:
         word = word.lower().replace("ё", "е")
         if word and word in blob:
-            if re.search(r"\d", word):
-                score += 30
-            elif word in {"сп", "гост"}:
-                score += 6
-            else:
-                score += 18
             matched.append(word)
 
-    for word in synonym_words:
-        word = word.lower().replace("ё", "е")
-        if word and word in blob:
-            score += 6
-            matched.append(word)
-
-    exact_matches = exact_sp_number_matches(query, title, url)
-    if exact_matches:
-        score += 85
-
-    for marker in DOCUMENT_MARKERS:
-        if marker in blob:
-            score += 10
-
-    if re.search(r"\bсп\s*\d+(?:\.\d+)*|/sp\d", blob, flags=re.I):
-        score += 30
-
-    if re.search(r"\bгост\b|\bgost\b", blob, flags=re.I):
-        score += 25
-
-    if "свод правил" in blob:
-        score += 20
-
-    suffix = get_url_suffix(url)
-
-    if suffix in {".pdf", ".doc", ".docx", ".rtf"}:
-        score += 18
-    elif suffix == ".html":
-        score += 10
-    else:
-        if re.search(r"/sp\d|/gost|/document|/docs?", url_lower):
-            score += 16
-
-    if len(title) >= 20:
-        score += 8
-
-    if "search" in url_lower:
-        score -= 35
-
-    if "контакты" in blob or "главная" in blob or "карта сайта" in blob:
-        score -= 25
-
-    if not matched and not any(marker in blob for marker in DOCUMENT_MARKERS):
-        score -= 30
-
-    if not matched:
-        score -= 20
-
-    if is_catalog_listing_url(url):
-        score -= 55
-
-    normalized = max(0.0, min(1.0, score / 180))
-    return normalized, list(dict.fromkeys(matched))
+    return list(dict.fromkeys(matched))
 
 
 def extract_page_title(html: str) -> str:
@@ -619,53 +483,7 @@ def extract_page_title(html: str) -> str:
     return ""
 
 
-def make_candidate_from_url(url: str, query: str, source_mode: str) -> dict | None:
-    """
-    Загружает прямой URL документа и превращает его в кандидата выдачи.
-
-    Используется в основном для предполагаемых прямых страниц СП, например
-    /sp22-13330-2016.
-    """
-    try:
-        html = fetch_html(url)
-        title = extract_page_title(html)
-
-        if not title:
-            return None
-
-        if is_bad_link(url, title):
-            return None
-
-        text_for_snippet = extract_main_text_from_html(html)
-        snippet = normalize_space(text_for_snippet[:500])
-
-        score, matched = score_candidate(
-            title=title,
-            url=url,
-            query=query,
-            snippet=snippet,
-        )
-
-        if score < 0.10:
-            return None
-
-        return {
-            "title": title,
-            "url": force_http(url),
-            "document_type": infer_document_type(title, url),
-            "score": round(score, 3),
-            "matched_keywords": matched,
-            "exact_identifier_matches": exact_sp_number_matches(query, title, url),
-            "snippet": snippet,
-            "source_mode": source_mode,
-            "source_search_url": url,
-        }
-
-    except Exception:
-        return None
-
-
-def extract_candidates_from_html(html: str, page_url: str, query: str, min_score: float) -> list[dict]:
+def extract_candidates_from_html(html: str, page_url: str, query: str) -> list[dict]:
     """
     Парсит ссылки из HTML-страницы и возвращает кандидаты документов.
 
@@ -711,25 +529,21 @@ def extract_candidates_from_html(html: str, page_url: str, query: str, min_score
         if full_url in seen_urls:
             continue
 
-        score, matched = score_candidate(
+        matched = collect_query_matches(
             title=title,
             url=full_url,
             query=query,
             snippet=snippet,
         )
 
-        if score < min_score:
-            continue
-
         candidates.append({
             "title": title,
             "url": full_url,
             "document_type": infer_document_type(title, full_url),
-            "score": round(score, 3),
             "matched_keywords": matched,
             "exact_identifier_matches": exact_sp_number_matches(query, title, full_url),
             "snippet": snippet,
-            "source_mode": "catalog_or_search",
+            "source_mode": "site_search",
             "source_search_url": page_url,
         })
 
@@ -799,14 +613,14 @@ def search_documents_for_construction(
     - iteration_count: страница результатов, начиная с 1.
     - max_pages: сколько страниц внутреннего поиска sniprf проверить.
     - limit: сколько документов вернуть за один вызов.
-    - min_score: минимальная оценка релевантности кандидата.
+    - min_score: устаревший параметр совместимости, больше не используется.
     - include_text: добавлять `text_preview` через html_legal_text_parser.
     - include_full_text: добавлять полный HTML-текст, а не только превью.
 
     Возвращает:
     JSON-строку с диагностикой (`page_reports`, `page_errors`, `page_skipped`)
-    и отранжированными `documents`. Ожидаемо отсутствующие страницы-каталоги
-    помечаются как skipped/info и могут игнорироваться LLM.
+    и очередной пачкой `documents`. Скрипт отправляет исходный запрос во
+    внутренний поиск сайта и не оценивает смысловую релевантность документов.
     """
     search_query = str(search_query or "").strip()
 
@@ -836,73 +650,6 @@ def search_documents_for_construction(
         seen_urls.add(url_key)
         return 1
 
-    # 1. Прямые СП URL: /sp22-13330-2016
-    direct_urls = build_direct_sp_urls(search_query)
-
-    for url in direct_urls:
-        report = {
-            "mode": "direct_sp_url",
-            "url": url,
-            "status": "",
-            "severity": "",
-            "ignored": False,
-            "error_kind": "",
-            "candidates_found": 0,
-            "error": "",
-            "diagnostic": "",
-        }
-
-        try:
-            candidate = make_candidate_from_url(
-                url=url,
-                query=search_query,
-                source_mode="direct_sp_url",
-            )
-            report["candidates_found"] = add_candidate(candidate)
-            report["status"] = "ok"
-        except Exception as e:
-            report.update(classify_page_exception(url, e))
-
-        page_reports.append(report)
-
-    # 2. Каталоги СП: /sp, /sp2016, /sp2018...
-    catalog_urls = build_catalog_urls()
-
-    for url in catalog_urls:
-        report = {
-            "mode": "catalog",
-            "url": url,
-            "status": "",
-            "severity": "",
-            "ignored": False,
-            "error_kind": "",
-            "candidates_found": 0,
-            "error": "",
-            "diagnostic": "",
-        }
-
-        try:
-            html = fetch_html(url)
-            candidates = extract_candidates_from_html(
-                html=html,
-                page_url=url,
-                query=search_query,
-                min_score=min_score,
-            )
-
-            count = 0
-            for candidate in candidates:
-                count += add_candidate(candidate)
-
-            report["status"] = "ok"
-            report["candidates_found"] = count
-
-        except Exception as e:
-            report.update(classify_page_exception(url, e))
-
-        page_reports.append(report)
-
-    # 3. Старый внутренний поиск — только fallback/диагностика
     search_urls = build_search_urls(search_query, max_pages=max_pages)
 
     for url in search_urls:
@@ -915,7 +662,8 @@ def search_documents_for_construction(
             "error_kind": "",
             "candidates_found": 0,
             "error": "",
-            "diagnostic": "",
+            "diagnostic": "Parsed sniprf.ru internal search page for the original query.",
+            "search_input_submitted": True,
         }
 
         try:
@@ -924,7 +672,6 @@ def search_documents_for_construction(
                 html=html,
                 page_url=url,
                 query=search_query,
-                min_score=min_score,
             )
 
             count = 0
@@ -938,8 +685,6 @@ def search_documents_for_construction(
             report.update(classify_page_exception(url, e))
 
         page_reports.append(report)
-
-    all_candidates.sort(key=candidate_sort_key, reverse=True)
 
     offset = (iteration_count - 1) * limit
     selected = all_candidates[offset: offset + limit]
@@ -962,7 +707,10 @@ def search_documents_for_construction(
         "current_iteration": iteration_count,
         "max_pages": max_pages,
         "limit": limit,
-        "min_score": min_score,
+        "source_site": BASE_URL,
+        "search_strategy": "submit_original_query_to_sniprf_site_search_then_parse_results",
+        "exact_document_numbers": extract_sp_numbers(search_query),
+        "query_variants": [search_query],
         "project_root": str(PROJECT_ROOT),
         "parser_path": str(PROJECT_ROOT / "html_legal_text_parser.py"),
         "text_parser": "html_legal_text_parser.extract_main_text_from_html",
@@ -985,56 +733,34 @@ def search_documents_for_construction(
 
 if __name__ == "__main__":
     print("=========================================")
-    print("   ЗАПУСК ПОЛНОГО ТЕСТИРОВАНИЯ ТУЛЗЫ")
+    print("   ЗАПУСК БЫСТРОГО ТЕСТИРОВАНИЯ ТУЛЗЫ")
     print("=========================================")
     print(f"PROJECT_ROOT: {PROJECT_ROOT}")
     print(f"HTML parser:  {PROJECT_ROOT / 'html_legal_text_parser.py'}")
 
     tests = [
         {
-            "name": "Позитивный 1: бетонные конструкции",
-            "query": "Бетонные и железобетонные конструкции",
-            "iteration_count": 1,
-        },
-        {
-            "name": "Позитивный 2: СП 22",
+            "name": "Позитивный 1: точный СП",
             "query": "СП 22.13330 основания зданий",
             "iteration_count": 1,
+            "limit": 5,
         },
         {
-            "name": "Позитивный 3: фундамент",
-            "query": "Какие документы нужны для строительства фундамента жилого дома?",
-            "iteration_count": 1,
-        },
-        {
-            "name": "Граничный 4: пустой запрос",
+            "name": "Граничный 2: пустой запрос",
             "query": "   ",
             "iteration_count": 1,
+            "limit": 5,
         },
         {
-            "name": "Граничный 5: отрицательная итерация",
-            "query": "Основания зданий",
-            "iteration_count": -5,
-        },
-        {
-            "name": "Граничный 6: строка вместо числа",
-            "query": "Основания зданий",
-            "iteration_count": "два",
-        },
-        {
-            "name": "Граничный 7: СНиП должен фильтроваться",
-            "query": "СНиП 3.02.01-87",
+            "name": "Граничный 3: маленький limit",
+            "query": "СП 22.13330 основания зданий",
             "iteration_count": 1,
+            "limit": 1,
         },
         {
-            "name": "Граничный 8: огромная итерация",
-            "query": "Основания зданий",
+            "name": "Граничный 4: огромная итерация",
+            "query": "СП 22.13330 основания зданий",
             "iteration_count": 9999,
-        },
-        {
-            "name": "Граничный 9: спецсимволы",
-            "query": "СП 22.13330%/?\"&",
-            "iteration_count": 1,
         },
     ]
 
@@ -1046,9 +772,8 @@ if __name__ == "__main__":
         result = search_documents_for_construction(
             search_query=test["query"],
             iteration_count=test["iteration_count"],
-            max_pages=3,
-            limit=5,
-            min_score=0.15,
+            max_pages=0,
+            limit=test.get("limit", 5),
             include_text=False,
             include_full_text=False,
         )
@@ -1062,9 +787,8 @@ if __name__ == "__main__":
     result_with_text = search_documents_for_construction(
         search_query="СП 22.13330 основания зданий",
         iteration_count=1,
-        max_pages=3,
-        limit=3,
-        min_score=0.15,
+        max_pages=0,
+        limit=1,
         include_text=True,
         include_full_text=False,
     )

@@ -1,0 +1,7 @@
+﻿tool=economy_fgis_tp
+script=tools\economy_fgis_tp\economy_fgis_tp_search_tool.py
+exit_code=0
+started=2026-07-17T15:16:34
+finished=2026-07-17T15:16:57
+duration_seconds=22.81
+log=tools\_test_logs\economy_fgis_tp_contract_run.log

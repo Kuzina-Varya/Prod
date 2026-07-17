@@ -1,4 +1,4 @@
-# Runtime dependencies for the sniprf.ru search tool.
+# Runtime dependencies for the docs.cntd.ru search tool.
 requests>=2.31.0
 beautifulsoup4>=4.12.0
 urllib3>=2.0.0

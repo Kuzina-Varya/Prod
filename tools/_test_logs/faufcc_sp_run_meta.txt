@@ -1,0 +1,5 @@
+﻿exit_code=0
+started=2026-07-17T15:05:42.4565826+06:00
+finished=2026-07-17T15:05:44.9071763+06:00
+duration_seconds=2.45
+log=tools\_test_logs\faufcc_sp_run.log

@@ -1,0 +1,7 @@
+﻿tool=nspd
+script=tools\nspd\nspd_search_tool.py
+exit_code=0
+started=2026-07-17T15:17:39
+finished=2026-07-17T15:18:10
+duration_seconds=31.36
+log=tools\_test_logs\nspd_contract_run.log

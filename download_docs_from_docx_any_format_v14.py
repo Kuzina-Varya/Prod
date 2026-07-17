@@ -14,6 +14,7 @@ from xml.etree import ElementTree as ET
 
 import requests
 from docx import Document
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
 try:
@@ -57,6 +58,52 @@ DEFAULT_MAX_PATH = 200
 
 logging.getLogger("pypdf").setLevel(logging.ERROR)
 
+WORD_HIGHLIGHT_YELLOW = "yellow"
+INSECURE_TLS_FALLBACK_HOSTS = {"ksrf.ru", "www.ksrf.ru"}
+
+
+class BadRegistryLinkError(RuntimeError):
+    pass
+
+
+def make_direct_session(base_session: requests.Session) -> requests.Session:
+    session = requests.Session()
+    session.trust_env = False
+    session.headers.update(base_session.headers)
+    session.cookies.update(base_session.cookies)
+    return session
+
+
+def make_insecure_tls_session(base_session: requests.Session) -> requests.Session:
+    session = make_direct_session(base_session)
+    session.verify = False
+    try:
+        requests.packages.urllib3.disable_warnings()  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    return session
+
+
+def error_category_from_text(text: str) -> str:
+    text = text or ""
+    if "CERTIFICATE_VERIFY_FAILED" in text or "SSLCertVerificationError" in text:
+        return "SSL_CERTIFICATE_ERROR"
+    if "ProxyError" in text or "407 Proxy Authentication Required" in text or "Tunnel connection failed" in text:
+        return "PROXY_ERROR"
+    if "403 Client Error: Forbidden" in text:
+        return "ACCESS_FORBIDDEN"
+    if "502" in text or "Bad Gateway" in text:
+        return "BAD_GATEWAY"
+    if "timed out" in text or "ConnectTimeout" in text or "ReadTimeout" in text:
+        return "TIMEOUT"
+    if "TooManyRedirects" in text or "Redirect loop" in text:
+        return "REDIRECT_ERROR"
+    if "404 Client Error: Not Found" in text or "410 Client Error: Gone" in text:
+        return "BAD_REGISTRY_LINK"
+    if "PDF" in text:
+        return "FILE_VALIDATION_ERROR"
+    return "SCRIPT_OR_DOWNLOAD_ERROR"
+
 
 def safe_name(text: str, max_len: int = 120) -> str:
     """РћС‡РёС‰Р°РµС‚ РёРјСЏ С„Р°Р№Р»Р°/РїР°РїРєРё РѕС‚ Р·Р°РїСЂРµС‰С‘РЅРЅС‹С… Windows-СЃРёРјРІРѕР»РѕРІ."""
@@ -94,6 +141,64 @@ def get_cell_hyperlinks(cell, rels) -> list[str]:
             result.append(url)
             seen.add(url)
     return result
+
+
+def set_run_highlight(run, color: str = WORD_HIGHLIGHT_YELLOW) -> None:
+    rpr = run.find(qn("w:rPr"))
+    if rpr is None:
+        rpr = OxmlElement("w:rPr")
+        run.insert(0, rpr)
+
+    highlight = rpr.find(qn("w:highlight"))
+    if highlight is None:
+        highlight = OxmlElement("w:highlight")
+        rpr.append(highlight)
+    highlight.set(qn("w:val"), color)
+
+
+def highlight_cell_text(cell, color: str = WORD_HIGHLIGHT_YELLOW) -> None:
+    """РџРѕРґСЃРІРµС‡РёРІР°РµС‚ РІРµСЃСЊ С‚РµРєСЃС‚ СЏС‡РµР№РєРё, РІРєР»СЋС‡Р°СЏ СЂР°РЅС‹ РІРЅСѓС‚СЂРё hyperlink."""
+    for run in cell._tc.xpath(".//w:r"):
+        set_run_highlight(run, color)
+
+
+def should_mark_registry_link(result: dict) -> bool:
+    if result.get("parent_url"):
+        return False
+    return result.get("bad_registry_link") == "1"
+
+
+def mark_bad_registry_links(registry_path: Path, bad_items: list[dict]) -> int:
+    if not bad_items:
+        return 0
+
+    doc = Document(registry_path)
+    rows_to_mark = {
+        (int(item["table_no"]), int(item["row_no"]))
+        for item in bad_items
+        if str(item.get("table_no", "")).isdigit() and str(item.get("row_no", "")).isdigit()
+    }
+    marked = 0
+
+    for table_no, table in enumerate(doc.tables, start=1):
+        if not table.rows:
+            continue
+        hm = header_map(table.rows[0])
+        link_idx = hm.get("link")
+        if link_idx is None:
+            continue
+
+        for row_no, row in enumerate(table.rows[1:], start=2):
+            if (table_no, row_no) not in rows_to_mark:
+                continue
+            if link_idx >= len(row.cells):
+                continue
+            highlight_cell_text(row.cells[link_idx])
+            marked += 1
+
+    if marked:
+        doc.save(registry_path)
+    return marked
 
 
 def force_scheme(url: str, scheme: str) -> str:
@@ -878,6 +983,12 @@ def item_requires_link_target(item: dict, args) -> bool:
     )
 
 
+def should_follow_page_links_for_item(item: dict, args) -> bool:
+    if not getattr(args, "follow_page_links", True) or item.get("no_follow_page_links"):
+        return False
+    return True
+
+
 def text_sidecar_path(path: Path, max_path: int = DEFAULT_MAX_PATH) -> Path:
     return fit_path_length(path.parent, path.stem + ".txt", max_path)
 
@@ -1223,9 +1334,9 @@ def download_linked_documents(
     http_encoding: str,
     root_dir: Path,
     args,
-) -> tuple[int, int, list[str]]:
+) -> tuple[int, int, list[str], int]:
     if not args.follow_page_links:
-        return 0, 0, []
+        return 0, 0, [], 0
 
     links = extract_followable_links_from_html(
         html_content,
@@ -1243,6 +1354,16 @@ def download_linked_documents(
     parent_depth = int(parent_item.get("link_depth", 0) or 0)
     max_link_depth = getattr(args, "max_link_depth", 2)
     chain_to_first_document = item_requires_link_target(parent_item, args)
+    allowed_generic_source = (
+        (
+            is_generic_source_url(parent_item.get("original_url", ""))
+            or is_generic_source_url(base_url)
+        )
+        and is_allowed_generic_source_item(parent_item)
+        and not chain_to_first_document
+    )
+    if allowed_generic_source:
+        max_link_depth = min(max_link_depth, getattr(args, "max_generic_source_depth", 2))
     navigation_source = (
         chain_to_first_document
         or is_generic_source_url(parent_item.get("original_url", ""))
@@ -1256,6 +1377,8 @@ def download_linked_documents(
         if not ajax_document_links:
             links = sorted(links, key=chain_link_score)
         max_chain_candidates = getattr(args, "max_chain_candidates", 0)
+        if allowed_generic_source and max_chain_candidates <= 0:
+            max_chain_candidates = getattr(args, "max_generic_source_links", 50)
         if max_chain_candidates > 0:
             links = links[:max_chain_candidates]
     elif args.max_page_links > 0:
@@ -1264,10 +1387,12 @@ def download_linked_documents(
     else:
         links = [link for link in links if is_probably_direct_document_link(link["url"])]
 
+    attempted = 0
     for idx, link in enumerate(links, start=1):
         link_key = canonical_link_key(link["url"])
         if navigation_source and link_key in visited_keys:
             continue
+        attempted += 1
         child_depth = parent_depth + 1
         child_item = {
             "registry": parent_item.get("registry", ""),
@@ -1295,7 +1420,7 @@ def download_linked_documents(
         if args.pause:
             time.sleep(args.pause)
 
-    return saved, errors, messages
+    return saved, errors, messages, attempted
 
 def controlled_get(session: requests.Session, url: str, timeout: tuple[int, int], max_redirects: int) -> requests.Response:
     """GET СЃ СЂСѓС‡РЅРѕР№ РѕР±СЂР°Р±РѕС‚РєРѕР№ СЂРµРґРёСЂРµРєС‚РѕРІ, С‡С‚РѕР±С‹ РїРµСЂРІС‹Рј СЂРµР°Р»СЊРЅРѕ РїСЂРѕР±РѕРІР°Р»СЃСЏ HTTP."""
@@ -1328,27 +1453,58 @@ def fetch_with_http_then_https(
     retries: int,
     retry_pause: float,
     max_redirects: int,
-) -> tuple[requests.Response, str, str]:
+) -> tuple[requests.Response, str, str, str]:
     """РџСЂРѕР±СѓРµС‚ HTTP, РµСЃР»Рё РЅРµ РїРѕР»СѓС‡РёР»РѕСЃСЊ вЂ” HTTPS. Р’РѕР·РІСЂР°С‰Р°РµС‚ response, successful_url, errors_text."""
     timeout = (connect_timeout, read_timeout)
     errors = []
+    bad_link_errors = []
+    technical_errors = []
+    direct_bad_link_errors = []
+    direct_technical_errors = []
+    access_modes = [("env_proxy", session)]
+    host = normalized_host(urlparse(original_url))
+    if getattr(session, "trust_env", True):
+        access_modes.append(("direct_no_proxy", make_direct_session(session)))
+        if host in INSECURE_TLS_FALLBACK_HOSTS:
+            access_modes.append(("direct_no_proxy_insecure_tls", make_insecure_tls_session(session)))
 
-    for cand in candidate_urls(original_url):
-        for attempt in range(1, retries + 1):
-            try:
-                response = controlled_get(session, cand, timeout=timeout, max_redirects=max_redirects)
-                # Р•СЃР»Рё HTTP-РѕС‚РІРµС‚ 4xx/5xx, СЃС‡РёС‚Р°РµРј РїРѕРїС‹С‚РєСѓ РЅРµСѓРґР°С‡РЅРѕР№ Рё РїСЂРѕР±СѓРµРј РґР°Р»СЊС€Рµ.
-                response.raise_for_status()
-                return response, cand, " | ".join(errors)
-            except Exception as e:
-                errors.append(f"{cand} attempt {attempt}/{retries}: {type(e).__name__}: {e}")
+    for access_mode, active_session in access_modes:
+        for cand in candidate_urls(original_url):
+            for attempt in range(1, retries + 1):
+                response = None
                 try:
-                    # Р—Р°РєСЂС‹С‚СЊ stream-response, РµСЃР»Рё РѕРЅ СѓСЃРїРµР» РѕС‚РєСЂС‹С‚СЊСЃСЏ.
-                    response.close()  # noqa: F821
-                except Exception:
-                    pass
-                if attempt < retries:
-                    time.sleep(retry_pause)
+                    response = controlled_get(active_session, cand, timeout=timeout, max_redirects=max_redirects)
+                    # Р•СЃР»Рё HTTP-РѕС‚РІРµС‚ 4xx/5xx, СЃС‡РёС‚Р°РµРј РїРѕРїС‹С‚РєСѓ РЅРµСѓРґР°С‡РЅРѕР№ Рё РїСЂРѕР±СѓРµРј РґР°Р»СЊС€Рµ.
+                    response.raise_for_status()
+                    return response, cand, " | ".join(errors), access_mode
+                except Exception as e:
+                    message = f"[{access_mode}] {cand} attempt {attempt}/{retries}: {type(e).__name__}: {e}"
+                    errors.append(message)
+                    status_code = getattr(getattr(e, "response", None), "status_code", None)
+                    is_bad_link_error = (
+                        isinstance(e, requests.HTTPError) and status_code in {404, 410}
+                    ) or isinstance(e, (requests.exceptions.InvalidURL, requests.exceptions.MissingSchema))
+                    if is_bad_link_error:
+                        bad_link_errors.append(message)
+                        if access_mode in {"direct_no_proxy", "direct_no_proxy_insecure_tls"}:
+                            direct_bad_link_errors.append(message)
+                    else:
+                        technical_errors.append(message)
+                        if access_mode in {"direct_no_proxy", "direct_no_proxy_insecure_tls"}:
+                            direct_technical_errors.append(message)
+                    try:
+                        # Р—Р°РєСЂС‹С‚СЊ stream-response, РµСЃР»Рё РѕРЅ СѓСЃРїРµР» РѕС‚РєСЂС‹С‚СЊСЃСЏ.
+                        if response is not None:
+                            response.close()
+                    except Exception:
+                        pass
+                    if attempt < retries:
+                        time.sleep(retry_pause)
+
+    if direct_bad_link_errors and not direct_technical_errors:
+        raise BadRegistryLinkError("Исходная ссылка не открылась как документ/ресурс. " + " | ".join(direct_bad_link_errors[-6:]))
+    if bad_link_errors and not technical_errors:
+        raise BadRegistryLinkError("Исходная ссылка не открылась как документ/ресурс. " + " | ".join(bad_link_errors[-6:]))
 
     raise RuntimeError("РќРµ СѓРґР°Р»РѕСЃСЊ СЃРєР°С‡Р°С‚СЊ РЅРё РїРѕ HTTP, РЅРё РїРѕ HTTPS. " + " | ".join(errors[-6:]))
 
@@ -1413,9 +1569,13 @@ def download_one(session: requests.Session, item: dict, root_dir: Path, args) ->
         "content_type": "",
         "encoding": "",
         "attempted_url": "",
+        "access_mode": "",
+        "error_category": "",
         "linked_found": "",
         "linked_saved": "",
         "linked_errors": "",
+        "linked_attempted": "",
+        "bad_registry_link": "",
         "error": "",
     })
 
@@ -1435,6 +1595,9 @@ def download_one(session: requests.Session, item: dict, root_dir: Path, args) ->
         query = protect_gost_search_query(item.get("original_url", ""))
         result["status"] = "SKIPPED_SEARCH_SOURCE" if item.get("parent_url") else "ERROR_BAD_REGISTRY_LINK"
         result["saved_to"] = str(target_dir)
+        result["error_category"] = "BAD_REGISTRY_LINK"
+        if not item.get("parent_url"):
+            result["bad_registry_link"] = "1"
         result["error"] = (
             "Ссылка protect.gost.ru/search является страницей поиска, а не конкретным документом. "
             "Она часто возвращает 404 и не скачивается как файл. "
@@ -1444,7 +1607,7 @@ def download_one(session: requests.Session, item: dict, root_dir: Path, args) ->
         return result
 
     try:
-        response, successful_url, previous_errors = fetch_with_http_then_https(
+        response, successful_url, previous_errors, access_mode = fetch_with_http_then_https(
             session=session,
             original_url=preferred_content_url(item["original_url"]),
             connect_timeout=args.connect_timeout,
@@ -1454,6 +1617,7 @@ def download_one(session: requests.Session, item: dict, root_dir: Path, args) ->
             max_redirects=args.max_redirects,
         )
         result["attempted_url"] = successful_url
+        result["access_mode"] = access_mode
         content_type = response.headers.get("Content-Type", "")
         result["content_type"] = content_type
 
@@ -1501,7 +1665,7 @@ def download_one(session: requests.Session, item: dict, root_dir: Path, args) ->
                         if looks_like_mojibake(old_text) or looks_like_pravo_shell_text(old_text) or not old_has_utf8_bom:
                             repair_existing_text = True
                         else:
-                            if file_type == "HTML_TEXT" and args.follow_page_links and not item.get("no_follow_page_links"):
+                            if file_type == "HTML_TEXT" and should_follow_page_links_for_item(item, args):
                                 skip_existing_text_write = True
                             else:
                                 result["status"] = "SKIPPED_EXISTS"
@@ -1531,7 +1695,7 @@ def download_one(session: requests.Session, item: dict, root_dir: Path, args) ->
             text, enc = html_to_readable_text(content, content_type=content_type, http_encoding=response.encoding or "")
             result["encoding"] = enc
             linked = []
-            if args.follow_page_links and not item.get("no_follow_page_links"):
+            if should_follow_page_links_for_item(item, args):
                 linked = extract_followable_links_from_html(
                     content,
                     base_url=response.url or successful_url,
@@ -1547,8 +1711,8 @@ def download_one(session: requests.Session, item: dict, root_dir: Path, args) ->
             else:
                 write_text_atomic(target_path, text, encoding="utf-8-sig")
                 result["status"] = "OK_HTML_TEXT_REPAIRED" if repair_existing_text else "OK_HTML_TEXT"
-            if args.follow_page_links and not item.get("no_follow_page_links"):
-                linked_saved, linked_errors, linked_messages = download_linked_documents(
+            if should_follow_page_links_for_item(item, args):
+                linked_saved, linked_errors, linked_messages, linked_attempted = download_linked_documents(
                     session=session,
                     parent_item=item,
                     parent_path=target_path,
@@ -1561,6 +1725,7 @@ def download_one(session: requests.Session, item: dict, root_dir: Path, args) ->
                 )
                 result["linked_saved"] = str(linked_saved)
                 result["linked_errors"] = str(linked_errors)
+                result["linked_attempted"] = str(linked_attempted)
                 if linked_errors:
                     append_result_error(result, "РћС€РёР±РєРё РІР»РѕР¶РµРЅРЅС‹С… СЃСЃС‹Р»РѕРє: " + " | ".join(linked_messages[:5]))
                 if skip_existing_text_write and linked_saved:
@@ -1576,8 +1741,18 @@ def download_one(session: requests.Session, item: dict, root_dir: Path, args) ->
             if result.get("generic_source_requires_links") == "1":
                 linked_saved_count = int(result.get("linked_saved") or 0)
                 if linked_saved_count <= 0:
-                    result["status"] = "ERROR_NO_LINKED_DOCUMENTS"
-                    append_result_error(result, "РЎСЃС‹Р»РєР° РІРµРґС‘С‚ РЅР° СЂР°Р·РґРµР»/РєР°С‚Р°Р»РѕРі; РєРѕРЅРєСЂРµС‚РЅС‹Рµ РґРѕРєСѓРјРµРЅС‚С‹ РїРѕ СЃСЃС‹Р»РєР°Рј РІРЅСѓС‚СЂРё СЃС‚СЂР°РЅРёС†С‹ РЅРµ РЅР°Р№РґРµРЅС‹ РёР»Рё РЅРµ СЃРєР°С‡Р°РЅС‹.")
+                    linked_attempted_count = int(result.get("linked_attempted") or 0)
+                    if linked_attempted_count <= 0:
+                        result["status"] = "ERROR_NO_LINKED_DOCUMENTS"
+                        result["error_category"] = "BAD_REGISTRY_LINK"
+                        if not item.get("parent_url"):
+                            result["bad_registry_link"] = "1"
+                        append_result_error(result, "РЎСЃС‹Р»РєР° РІРµРґС‘С‚ РЅР° СЂР°Р·РґРµР»/РєР°С‚Р°Р»РѕРі; РєРѕРЅРєСЂРµС‚РЅС‹Рµ РґРѕРєСѓРјРµРЅС‚С‹ РїРѕ СЃСЃС‹Р»РєР°Рј РІРЅСѓС‚СЂРё СЃС‚СЂР°РЅРёС†С‹ РЅРµ РЅР°Р№РґРµРЅС‹.")
+                    else:
+                        result["status"] = "ERROR_LINKED_DOCUMENT_DOWNLOAD_FAILED"
+                        result["bad_registry_link"] = ""
+                        result["error_category"] = "LINKED_DOCUMENT_DOWNLOAD_FAILED"
+                        append_result_error(result, "Ссылка ведёт на страницу с кандидатами документов, но скачать найденные документы не удалось. Это ошибка скачивания/обработки, исходная ссылка не помечается маркером.")
         elif file_type == "TEXT":
             content = first_chunk + b"".join(chunk for chunk in iterator if chunk)
             text, enc = decode_html(content, content_type=content_type, http_encoding=response.encoding or "")
@@ -1593,7 +1768,7 @@ def download_one(session: requests.Session, item: dict, root_dir: Path, args) ->
                             response.close()
                         except Exception:
                             pass
-                        response, successful_url, _ = fetch_with_http_then_https(
+                        response, successful_url, _, access_mode = fetch_with_http_then_https(
                             session=session,
                             original_url=preferred_content_url(item["original_url"]),
                             connect_timeout=args.connect_timeout,
@@ -1603,6 +1778,7 @@ def download_one(session: requests.Session, item: dict, root_dir: Path, args) ->
                             max_redirects=args.max_redirects,
                         )
                         result["attempted_url"] = successful_url
+                        result["access_mode"] = access_mode
                         content_type = response.headers.get("Content-Type", "")
                         result["content_type"] = content_type
                         iterator = response.iter_content(CHUNK_SIZE)
@@ -1641,9 +1817,16 @@ def download_one(session: requests.Session, item: dict, root_dir: Path, args) ->
         response.close()
         return result
 
+    except BadRegistryLinkError as e:
+        result["status"] = "ERROR_BAD_REGISTRY_LINK"
+        result["bad_registry_link"] = "1"
+        result["error"] = str(e)
+        result["error_category"] = "BAD_REGISTRY_LINK"
+        return result
     except Exception as e:
         result["status"] = "ERROR"
         result["error"] = f"{type(e).__name__}: {e}"
+        result["error_category"] = error_category_from_text(result["error"])
         return result
 
 
@@ -1691,6 +1874,8 @@ def main():
     parser.add_argument("--max-page-links", type=int, default=0, help="РњР°РєСЃРёРјСѓРј РІР»РѕР¶РµРЅРЅС‹С… СЃСЃС‹Р»РѕРє РґР»СЏ РѕРґРЅРѕР№ HTML-СЃС‚СЂР°РЅРёС†С‹; 0 = РІСЃРµ СѓРЅРёРєР°Р»СЊРЅС‹Рµ РґРѕРєСѓРјРµРЅС‚С‹")
     parser.add_argument("--max-link-depth", type=int, default=2, help="РњР°РєСЃРёРјСѓРј РІРЅСѓС‚СЂРµРЅРЅРёС… РїРµСЂРµС…РѕРґРѕРІ РїРѕ HTML-СЂР°Р·РґРµР»Р°Рј: 1 = С‚РѕР»СЊРєРѕ РїСЂСЏРјС‹Рµ СЃСЃС‹Р»РєРё, 2 = СЂР°Р·РґРµР» -> РґРѕРєСѓРјРµРЅС‚")
     parser.add_argument("--max-chain-candidates", type=int, default=0, help="Сколько внутренних ссылок-кандидатов пробовать на каждом уровне HTML-раздела; 0 = все")
+    parser.add_argument("--max-generic-source-links", type=int, default=50, help="Сколько ссылок-кандидатов брать с разрешённых общих порталов/каталогов; 0 = без лимита")
+    parser.add_argument("--max-generic-source-depth", type=int, default=2, help="Глубина обхода разрешённых общих порталов/каталогов")
     parser.add_argument("--only-nums", default="", help="Обработать только номера строк реестра через запятую, например: 27,114,115,122")
     parser.add_argument("--start-index", type=int, default=1, help="РЎ РєР°РєРѕР№ РЅР°Р№РґРµРЅРЅРѕР№ СЃСЃС‹Р»РєРё РЅР°С‡Р°С‚СЊ РѕР±СЂР°Р±РѕС‚РєСѓ")
     parser.add_argument("--limit", type=int, default=0, help="РћР±СЂР°Р±РѕС‚Р°С‚СЊ РЅРµ Р±РѕР»СЊС€Рµ N СЃСЃС‹Р»РѕРє; 0 = Р±РµР· РѕРіСЂР°РЅРёС‡РµРЅРёСЏ")
@@ -1719,6 +1904,7 @@ def main():
         registry_rows = list(iter_registry_rows(registry_path))
         for row in registry_rows:
             row["registry"] = registry_path.name
+            row["registry_path"] = str(registry_path)
         rows.extend(registry_rows)
 
     total_rows = len(rows)
@@ -1740,14 +1926,15 @@ def main():
 
     fieldnames = [
         "registry", "table_no", "row_no", "num", "title", "folder",
-        "original_url", "download_url", "attempted_url", "status", "file_type",
-        "saved_to", "text_saved_to", "linked_found", "linked_saved", "linked_errors",
-        "content_type", "encoding", "error"
+        "original_url", "download_url", "attempted_url", "access_mode", "status", "file_type",
+        "saved_to", "text_saved_to", "linked_found", "linked_saved", "linked_errors", "linked_attempted",
+        "content_type", "encoding", "bad_registry_link", "error_category", "error"
     ]
 
     stats = {}
     ok = skipped = errors = 0
     error_rows = []
+    bad_registry_links = {}
 
     for i, item in enumerate(rows, start=1):
         registry_prefix = f"{item.get('registry', docx_path.name)} | "
@@ -1756,10 +1943,14 @@ def main():
 
         status = result.get("status", "")
         stats[status] = stats.get(status, 0) + 1
+        if should_mark_registry_link(result):
+            result_registry_path = result.get("registry_path")
+            if result_registry_path:
+                bad_registry_links.setdefault(result_registry_path, []).append(result)
 
         if status.startswith("OK"):
             ok += 1
-            print(f"  OK {result.get('file_type', '')}: {result.get('saved_to', '')}" + (f" | encoding={result.get('encoding')}" if result.get('encoding') else ""))
+            print(f"  OK {result.get('file_type', '')}: {result.get('saved_to', '')}" + (f" | access={result.get('access_mode')}" if result.get("access_mode") else "") + (f" | encoding={result.get('encoding')}" if result.get('encoding') else ""))
             if result.get("text_saved_to"):
                 print(f"  TXT: {result.get('text_saved_to')}")
             if result.get("linked_found"):
@@ -1779,7 +1970,11 @@ def main():
         else:
             errors += 1
             error_rows.append(result)
-            print(f"  ERROR: {result.get('error', '')}")
+            if result.get("bad_registry_link") == "1":
+                print(f"  BAD LINK: {result.get('error', '')}")
+            else:
+                category = result.get("error_category") or error_category_from_text(result.get("error", ""))
+                print(f"  ERROR [{category}]: {result.get('error', '')}")
 
         if args.pause and not args.dry_run:
             time.sleep(args.pause)
@@ -1793,6 +1988,16 @@ def main():
         print("По статусам:")
         for k, v in sorted(stats.items()):
             print(f"  {k}: {v}")
+
+    if bad_registry_links:
+        print("\nПодсветка битых ссылок в реестрах:")
+        for registry_path_text, bad_items in sorted(bad_registry_links.items()):
+            registry_path = Path(registry_path_text)
+            try:
+                marked = mark_bad_registry_links(registry_path, bad_items)
+                print(f"  {registry_path}: выделено строк со ссылками: {marked}")
+            except Exception as e:
+                print(f"  {registry_path}: не удалось сохранить подсветку: {type(e).__name__}: {e}")
 
     if errors:
         if args.no_error_log:

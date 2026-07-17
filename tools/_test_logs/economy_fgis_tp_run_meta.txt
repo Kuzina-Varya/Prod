@@ -1,0 +1,5 @@
+﻿exit_code=0
+started=2026-07-17T13:51:33.3162362+06:00
+finished=2026-07-17T13:52:13.2597140+06:00
+duration_seconds=39.94
+log=tools\_test_logs\economy_fgis_tp_run.log

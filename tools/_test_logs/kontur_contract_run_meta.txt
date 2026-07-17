@@ -1,0 +1,7 @@
+﻿tool=kontur
+script=tools\kontur\kontur_search_tool.py
+exit_code=0
+started=2026-07-17T15:14:34
+finished=2026-07-17T15:15:02
+duration_seconds=27.82
+log=tools\_test_logs\kontur_contract_run.log

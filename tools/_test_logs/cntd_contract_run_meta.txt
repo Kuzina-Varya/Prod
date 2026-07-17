@@ -1,0 +1,7 @@
+﻿tool=cntd
+script=tools\cntd\cntd_search_tool.py
+exit_code=0
+started=2026-07-17T15:14:20
+finished=2026-07-17T15:14:34
+duration_seconds=13.6
+log=tools\_test_logs\cntd_contract_run.log

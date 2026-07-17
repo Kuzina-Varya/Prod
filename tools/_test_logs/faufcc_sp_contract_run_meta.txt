@@ -1,0 +1,7 @@
+﻿tool=faufcc_sp
+script=tools\faufcc_sp\faufcc_sp_search_tool.py
+exit_code=0
+started=2026-07-17T15:18:10
+finished=2026-07-17T15:18:13
+duration_seconds=2.51
+log=tools\_test_logs\faufcc_sp_contract_run.log

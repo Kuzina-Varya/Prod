@@ -1,0 +1,117 @@
+{
+  "status": "success",
+  "query": "СП 20.13330.2016",
+  "current_iteration": 1,
+  "max_pages": 2,
+  "limit": 5,
+  "source_site": "https://faufcc.ru/deiatelnost/normirovanie-i-standartizatsiia/reestr-svodov-pravil",
+  "api_site": "https://api.faufcc.ru",
+  "registry_id": "c5020d9a-a239-4806-a793-ac66cb36c71a",
+  "registry_type": "ruleset",
+  "registry_title": "Реестр сводов правил",
+  "search_strategy": "discover_registry_then_use_site_registry_search",
+  "query_variants": [
+    "СП 20.13330.2016"
+  ],
+  "min_score_ignored": 0.15,
+  "include_text_ignored": false,
+  "include_full_text_ignored": false,
+  "exact_document_numbers": [
+    "СП 20.13330.2016"
+  ],
+  "categories_found": null,
+  "leaf_categories_checked": null,
+  "pages_checked": 3,
+  "page_errors": 0,
+  "page_skipped": 0,
+  "page_reports": [
+    {
+      "mode": "start_page",
+      "url": "https://faufcc.ru/deiatelnost/normirovanie-i-standartizatsiia/reestr-svodov-pravil",
+      "status": "ok",
+      "http_status": 200,
+      "content_type": "text/html; charset=utf-8",
+      "content_length": 6109,
+      "title": "Техническое нормирование в строительстве",
+      "error_kind": "",
+      "error": ""
+    },
+    {
+      "mode": "registry_discovery_cache",
+      "url": "https://faufcc.ru/deiatelnost/normirovanie-i-standartizatsiia/reestr-svodov-pravil",
+      "status": "ok",
+      "http_status": 0,
+      "candidates_found": 1,
+      "error_kind": "",
+      "error": "",
+      "diagnostic": {
+        "page_id": "199ac460-6619-45ad-b44a-0b59b6f727a1",
+        "registry_id": "c5020d9a-a239-4806-a793-ac66cb36c71a"
+      }
+    },
+    {
+      "mode": "registry_entries_search",
+      "url": "https://api.faufcc.ru/api/registries/entries?page=1&filters=%7B%22registry%22%3A%22c5020d9a-a239-4806-a793-ac66cb36c71a%22%2C%22search%22%3A%22%D0%A1%D0%9F+20.13330.2016%22%7D&include=asset%2Ccategory",
+      "status": "ok",
+      "http_status": 200,
+      "candidates_found": 1,
+      "error_kind": "",
+      "error": "",
+      "diagnostic": {
+        "page": 1,
+        "total": 1,
+        "total_pages": 1,
+        "search": "СП 20.13330.2016"
+      }
+    }
+  ],
+  "total_candidates_found": 1,
+  "documents_returned": 1,
+  "has_more_documents": false,
+  "documents": [
+    {
+      "title": "СП 20.13330.2016 СНиП 2.01.07-85* Нагрузки и воздействия",
+      "url": "https://api.faufcc.ru/api/assets/9192df57-8c12-4043-85aa-45486fac1377/download",
+      "document_type": "Свод правил",
+      "content_status": "binary_document_not_parsed_here",
+      "source_mode": "faufcc_registry_api",
+      "source_search_url": "https://api.faufcc.ru/api/registries/entries?page=1&filters=%7B%22registry%22%3A%22c5020d9a-a239-4806-a793-ac66cb36c71a%22%2C%22search%22%3A%22%D0%A1%D0%9F+20.13330.2016%22%7D&include=asset%2Ccategory",
+      "source_query_variant": "СП 20.13330.2016",
+      "match_query_used": "СП 20.13330.2016",
+      "entry_id": "307ed4bd-54c2-4e6d-8262-a0bc7ffe7c3c",
+      "number": "СП 20.13330.2016",
+      "name": "СНиП 2.01.07-85* Нагрузки и воздействия",
+      "state": {
+        "name": "active",
+        "title": "Действует"
+      },
+      "active_since": "2022-07-27T00:00:00+03:00",
+      "active_till": null,
+      "suspended_since": null,
+      "suspended_till": null,
+      "cancelled_at": null,
+      "category_id": "68ea4c27-b04d-4075-9930-8d8ceba36a42",
+      "category_name": "20 Механическая безопасность строительных сооружений",
+      "category_path": [
+        "20 Механическая безопасность строительных сооружений"
+      ],
+      "asset": {
+        "id": "9192df57-8c12-4043-85aa-45486fac1377",
+        "mime": "application/pdf",
+        "name": "СП 20.13330.2011 СНиП 2.01.07-85 Нагрузки и воздействия.pdf",
+        "filename": "СП 20.13330.2011 СНиП 2.01.07-85 Нагрузки и воздействия.pdf",
+        "extension": "pdf",
+        "open_url": "https://api.faufcc.ru/api/assets/9192df57-8c12-4043-85aa-45486fac1377",
+        "download_url": "https://api.faufcc.ru/api/assets/9192df57-8c12-4043-85aa-45486fac1377/download"
+      },
+      "matched_keywords": [
+        "СП 20.13330.2016",
+        "20.13330.2016"
+      ],
+      "exact_identifier_matches": [
+        "СП 20.13330.2016"
+      ],
+      "snippet": "Категория: 20 Механическая безопасность строительных сооружений. Статус: Действует. Действует с: 2022-07-27T00:00:00+03:00"
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+﻿tool=sniprf
+script=tools\sniprf\sniprf_search_tool.py
+exit_code=0
+started=2026-07-17T15:14:17
+finished=2026-07-17T15:14:20
+duration_seconds=3.32
+log=tools\_test_logs\sniprf_contract_run.log
